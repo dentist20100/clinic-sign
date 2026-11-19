@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<title>توقيع العيادة</title>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; font-family: system-ui, -apple-system, "Segoe UI", Tahoma, sans-serif; background: #f3f5f7; color: #1d2b36; overscroll-behavior: none; }
+  body { display: flex; flex-direction: column; padding: 12px; gap: 10px; }
+  .screen { display: none; flex: 1; flex-direction: column; gap: 10px; min-height: 0; }
+  .screen.on { display: flex; }
+  .center { align-items: center; justify-content: center; text-align: center; }
+  h1 { font-size: 20px; margin: 0; text-align: center; }
+  #status { font-size: 14px; color: #5b6b78; text-align: center; }
+  .ok { color: #1a7f4b !important; } .err { color: #b42318 !important; }
+  #wrap { flex: 1; display: flex; align-items: center; justify-content: center; min-height: 0; }
+  #pad { background: #fff; border: 2px dashed #9fb3c8; border-radius: 12px; touch-action: none; display: block; }
+  .hint { text-align: center; font-size: 13px; color: #7a8a97; }
+  .buttons { display: flex; gap: 10px; }
+  button { flex: 1; font-size: 18px; padding: 14px; border-radius: 10px; border: 0; font-family: inherit; }
+  #clear { background: #e4e9ee; color: #1d2b36; }
+  #send { background: #1a7f4b; color: #fff; }
+  button:disabled { opacity: .45; }
+  .big { font-size: 64px; line-height: 1; }
+  #waitText { font-size: 20px; }
+  #waitSub { font-size: 14px; color: #7a8a97; max-width: 320px; }
+</style>
+</head>
+<body>
+  <!-- شاشة الانتظار (جوال العيادة) -->
+  <div id="waiting" class="screen center">
+    <div class="big">✍️</div>
+    <div id="waitText">في انتظار الإقرار من الكمبيوتر…</div>
+    <div id="waitSub">اترك هذه الصفحة مفتوحة. عند الضغط على زر التوقيع في الكمبيوتر ستظهر خانة التوقيع هنا تلقائياً.</div>
+  </div>
+
+  <!-- شاشة التوقيع -->
+  <div id="signing" class="screen">
+    <h1>وقّع بإصبعك داخل المربع</h1>
+    <div id="status"></div>
+    <div id="wrap"><canvas id="pad"></canvas></div>
+    <div class="hint">يمكنك قلب الجوال بالعرض للحصول على مساحة أكبر</div>
+    <div class="buttons">
+      <button id="clear">مسح</button>
+      <button id="send" disabled>إرسال التوقيع</button>
+    </div>
+  </div>
+
+  <!-- شاشة النجاح -->
+  <div id="done" class="screen center">
+    <div class="big ok">✓</div>
+    <div style="font-size:22px" class="ok">تم إرسال التوقيع، شكراً لك</div>
+  </div>
+
+<script>
+(() => {
+  const hash = decodeURIComponent(location.hash.slice(1));
+  const pairMode = hash.startsWith('pair=');           // جوال العيادة المربوط دائماً
+  const pairCode = pairMode ? hash.slice(5) : null;
+  const deskId = pairMode ? null : hash;                // وضع QR لمرة واحدة
+
+  const $ = id => document.getElementById(id);
+  const canvas = $('pad'), ctx = canvas.getContext('2d');
+  const sendBtn = $('send'), clearBtn = $('clear');
+  let aspect = 3, strokes = [], current = null, conn = null, peer = null, wakeLock = null;
+
+  function show(name) { document.querySelectorAll('.screen').forEach(s => s.classList.toggle('on', s.id === name)); if (name === 'signing') layout(); }
+  function setStatus(t, cls) { $('status').textContent = t; $('status').className = cls || ''; }
+  function setWait(t, cls, sub) { $('waitText').textContent = t; $('waitText').className = cls || ''; if (sub !== undefined) $('waitSub').textContent = sub; }
+
+  // ---------- لوحة التوقيع ----------
+  function layout() {
+    const wrap = $('wrap');
+    const maxW = wrap.clientWidth, maxH = wrap.clientHeight;
+    if (!maxW || !maxH) return;
+    let w = maxW, h = w / aspect;
+    if (h > maxH) { h = maxH; w = h * aspect; }
+    const dpr = window.devicePixelRatio || 1;
+    canvas.style.width = w + 'px'; canvas.style.height = h + 'px';
+    canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    redraw();
+  }
+  function redraw() {
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    ctx.clearRect(0, 0, w, h);
+    ctx.lineWidth = 2.5; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.strokeStyle = '#111';
+    for (const s of strokes) {
+      ctx.beginPath();
+      s.forEach((p, i) => i ? ctx.lineTo(p.x * w, p.y * h) : ctx.moveTo(p.x * w, p.y * h));
+      if (s.length === 1) ctx.lineTo(s[0].x * w + 0.1, s[0].y * h);
+      ctx.stroke();
+    }
+  }
+  function point(e) {
+    const r = canvas.getBoundingClientRect();
+    return { x: Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)), y: Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)) };
+  }
+  function send(msg) { if (conn && conn.open) conn.send(msg); }
+
+  canvas.addEventListener('pointerdown', e => {
+    e.preventDefault(); canvas.setPointerCapture(e.pointerId);
+    current = [point(e)]; strokes.push(current); redraw();
+  });
+  canvas.addEventListener('pointermove', e => {
+    if (!current) return; e.preventDefault();
+    for (const ev of (e.getCoalescedEvents ? e.getCoalescedEvents() : [e])) current.push(point(ev));
+    redraw();
+  });
+  const end = () => { if (!current) return; current = null; sendBtn.disabled = !(conn && conn.open); send({ type: 'preview', strokes }); };
+  canvas.addEventListener('pointerup', end);
+  canvas.addEventListener('pointercancel', end);
+  clearBtn.onclick = () => { strokes = []; redraw(); sendBtn.disabled = true; send({ type: 'preview', strokes }); };
+  sendBtn.onclick = () => {
+    if (!strokes.length || !conn || !conn.open) return;
+    send({ type: 'submit', strokes });
+    show('done');
+    const c = conn;
+    setTimeout(() => {
+      try { c.close(); } catch (_) {}
+      if (pairMode) { conn = null; setWait('في انتظار الإقرار من الكمبيوتر…', '', 'أعد الجوال إلى موظف الاستقبال.'); show('waiting'); }
+      else { try { peer.destroy(); } catch (_) {} }
+    }, pairMode ? 3000 : 1500);
+  };
+  window.addEventListener('resize', layout);
+
+  function startSigning(c, a) {
+    conn = c; aspect = a || 3; strokes = []; sendBtn.disabled = true;
+    setStatus('وقّع ثم اضغط «إرسال التوقيع»', 'ok');
+    show('signing');
+    if (navigator.vibrate) navigator.vibrate(150);
+  }
+
+  // إبقاء الشاشة مضاءة في جوال العيادة
+  async function keepAwake() {
+    try { if ('wakeLock' in navigator && !wakeLock) { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => wakeLock = null); } } catch (_) {}
+  }
+
+  // ---------- الوضع 1: جوال العيادة المربوط ----------
+  function startPaired() {
+    show('waiting');
+    setWait('جارٍ الاتصال…');
+    peer = new Peer('clinicsign-' + pairCode);
+    peer.on('open', () => setWait('في انتظار الإقرار من الكمبيوتر…', '', 'اترك هذه الصفحة مفتوحة. عند الضغط على زر التوقيع في الكمبيوتر ستظهر خانة التوقيع هنا تلقائياً.'));
+    peer.on('connection', c => {
+      c.on('data', msg => {
+        if (msg && msg.type === 'config') {
+          if (conn && conn !== c) { try { conn.close(); } catch (_) {} } // طلب جديد يلغي القديم
+          startSigning(c, msg.aspect);
+        }
+      });
+      c.on('close', () => {
+        if (conn === c) { conn = null; if ($('signing').classList.contains('on')) { setWait('تم إلغاء طلب التوقيع من الكمبيوتر', 'err', ''); show('waiting'); } }
+      });
+    });
+    peer.on('disconnected', () => { setTimeout(() => { if (peer && !peer.destroyed && peer.disconnected) peer.reconnect(); }, 2000); });
+    peer.on('error', err => {
+      if (err.type === 'unavailable-id') setWait('صفحة التوقيع مفتوحة في جهاز أو تبويب آخر', 'err', 'أغلق التبويبات الأخرى ثم أعد فتح هذه الصفحة.');
+      else if (err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error') {
+        setWait('لا يوجد اتصال بالإنترنت… جارٍ إعادة المحاولة', 'err');
+        setTimeout(() => { if (peer.destroyed) startPaired(); else if (peer.disconnected) peer.reconnect(); }, 4000);
+      }
+    });
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return;
+    keepAwake();
+    if (pairMode && peer) { if (peer.destroyed) startPaired(); else if (peer.disconnected) peer.reconnect(); }
+  });
+  document.addEventListener('pointerdown', keepAwake, { once: true });
+
+  // ---------- الوضع 2: رمز QR لمرة واحدة ----------
+  function startQr() {
+    if (!deskId) { setWait('الرابط غير صحيح', 'err', 'امسح رمز QR من جديد.'); show('waiting'); return; }
+    setStatus('جارٍ الاتصال بكمبيوتر العيادة…'); show('signing');
+    peer = new Peer();
+    peer.on('open', () => {
+      const c = peer.connect(deskId, { reliable: true });
+      c.on('open', () => setStatus('متصل ✓ — وقّع ثم اضغط «إرسال التوقيع»', 'ok'));
+      c.on('data', msg => { if (msg && msg.type === 'config') startSigning(c, msg.aspect); });
+      c.on('close', () => { if (!$('done').classList.contains('on')) setStatus('انقطع الاتصال بالكمبيوتر. امسح رمز QR من جديد.', 'err'); sendBtn.disabled = true; });
+    });
+    peer.on('error', err => setStatus(err.type === 'peer-unavailable' ? 'انتهت صلاحية رمز QR. اطلب رمزاً جديداً.' : 'تعذّر الاتصال. تأكد من الإنترنت.', 'err'));
+  }
+
+  pairMode ? startPaired() : startQr();
+  keepAwake();
+})();
+</script>
+</body>
+</html>

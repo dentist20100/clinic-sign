@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<title>توقيع المريض</title>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<style>
+  html, body { margin: 0; font-family: system-ui, "Segoe UI", Tahoma, sans-serif; color: #1d2b36; background: #fff; }
+  body { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 18px; text-align: center; }
+  h2 { margin: 0; font-size: 19px; }
+  #qr { padding: 10px; border: 1px solid #dfe6ec; border-radius: 10px; display: none; }
+  #status { font-size: 16px; color: #5b6b78; min-height: 22px; }
+  .ok { color: #1a7f4b !important; } .err { color: #b42318 !important; }
+  #preview { border: 2px dashed #9fb3c8; border-radius: 10px; background: #fff; display: none; }
+  small { color: #7a8a97; line-height: 1.6; }
+  button { font: inherit; font-size: 15px; padding: 8px 18px; border-radius: 8px; border: 1px solid #c5d1db; background: #f3f5f7; cursor: pointer; display: none; }
+  .big { font-size: 48px; line-height: 1; }
+</style>
+</head>
+<body>
+  <h2 id="title"></h2>
+  <div id="icon" class="big"></div>
+  <div id="qr"></div>
+  <canvas id="preview"></canvas>
+  <div id="status"></div>
+  <button id="retry">إعادة المحاولة</button>
+  <small id="note"></small>
+
+<script>
+(() => {
+  const params = new URLSearchParams(location.search);
+  const aspect = Math.max(0.5, Math.min(10, parseFloat(params.get('aspect')) || 3));
+  const parentOrigin = params.get('origin') || '*';
+  const pair = params.get('pair');     // جوال العيادة المربوط
+  const setup = params.get('setup');   // شاشة الربط لأول مرة
+  const $ = id => document.getElementById(id);
+  const preview = $('preview'), pctx = preview.getContext('2d');
+  const signBase = new URL('sign.html', location.href).href.split('?')[0];
+
+  function setStatus(t, cls) { $('status').textContent = t; $('status').className = cls || ''; }
+  function toParent(msg) { window.parent.postMessage(Object.assign({ source: 'clinic-sign' }, msg), parentOrigin); }
+  function showQr(text) { const q = $('qr'); q.innerHTML = ''; q.style.display = 'block'; new QRCode(q, { text, width: 220, height: 220, correctLevel: QRCode.CorrectLevel.M }); }
+
+  // معاينة التوقيع لحظياً بنفس شكل خانة الإقرار
+  const PW = 360, PH = Math.round(PW / aspect);
+  preview.width = PW; preview.height = PH;
+  function drawPreview(strokes) {
+    preview.style.display = 'block'; $('qr').style.display = 'none'; $('icon').textContent = '';
+    pctx.clearRect(0, 0, PW, PH);
+    pctx.lineWidth = 2; pctx.lineCap = 'round'; pctx.lineJoin = 'round';
+    for (const s of strokes || []) {
+      pctx.beginPath();
+      s.forEach((p, i) => i ? pctx.lineTo(p.x * PW, p.y * PH) : pctx.moveTo(p.x * PW, p.y * PH));
+      if (s.length === 1) pctx.lineTo(s[0].x * PW + 0.5, s[0].y * PH);
+      pctx.stroke();
+    }
+  }
+  function validStrokes(s) {
+    return Array.isArray(s) && s.length < 500 && s.every(st => Array.isArray(st) && st.length < 5000 &&
+      st.every(p => p && typeof p.x === 'number' && typeof p.y === 'number' && p.x >= 0 && p.x <= 1 && p.y >= 0 && p.y <= 1));
+  }
+
+  // استقبال التوقيع من الجوال (مشترك بين الوضعين)
+  function handle(conn, peer) {
+    conn.on('data', msg => {
+      if (!msg || !validStrokes(msg.strokes)) return;
+      if (msg.type === 'preview') { drawPreview(msg.strokes); setStatus('المريض يوقّع الآن…', 'ok'); }
+      if (msg.type === 'submit') {
+        drawPreview(msg.strokes);
+        setStatus('تم استلام التوقيع ✓ جارٍ وضعه في الإقرار…', 'ok');
+        toParent({ type: 'strokes', strokes: msg.strokes });
+        setTimeout(() => peer.destroy(), 1000);
+      }
+    });
+  }
+
+  // ---------- شاشة ربط جوال العيادة (مرة واحدة) ----------
+  if (setup) {
+    $('title').textContent = 'ربط جوال العيادة (مرة واحدة فقط)';
+    showQr(signBase + '#pair=' + setup);
+    setStatus('امسح الرمز بكاميرا جوال العيادة');
+    $('note').innerHTML = 'بعد أن تفتح الصفحة على الجوال: أضفها إلى الشاشة الرئيسية<br>(Chrome: ⋮ ← إضافة إلى الشاشة الرئيسية — آيفون: زر المشاركة ← إضافة إلى الشاشة الرئيسية)';
+    return;
+  }
+
+  // ---------- إرسال طلب التوقيع إلى جوال العيادة ----------
+  if (pair) {
+    $('title').textContent = 'توقيع المريض';
+    $('icon').textContent = '📱';
+    $('note').textContent = 'التوقيع ينتقل مباشرة من الجوال إلى هذا الكمبيوتر ولا يُحفظ على أي سيرفر';
+    let peer;
+    function connect() {
+      $('retry').style.display = 'none';
+      setStatus('جارٍ الاتصال بجوال العيادة…');
+      if (peer) try { peer.destroy(); } catch (_) {}
+      peer = new Peer();
+      peer.on('open', () => {
+        const conn = peer.connect('clinicsign-' + pair, { reliable: true });
+        conn.on('open', () => {
+          conn.send({ type: 'config', aspect });
+          setStatus('✓ ظهرت خانة التوقيع على جوال العيادة — أعطِ الجوال للمريض', 'ok');
+        });
+        conn.on('close', () => { if (!peer.destroyed) { setStatus('انقطع الاتصال بالجوال', 'err'); $('retry').style.display = 'inline-block'; } });
+        handle(conn, peer);
+      });
+      peer.on('error', err => {
+        setStatus(err.type === 'peer-unavailable'
+          ? 'جوال العيادة غير متصل — افتح صفحة التوقيع على الجوال ثم اضغط «إعادة المحاولة»'
+          : 'تعذّر الاتصال بالإنترنت (' + err.type + ')', 'err');
+        $('retry').style.display = 'inline-block';
+      });
+    }
+    $('retry').onclick = connect;
+    connect();
+    return;
+  }
+
+  // ---------- وضع QR لمرة واحدة (جوال المريض) ----------
+  $('title').textContent = 'امسح الرمز بكاميرا الجوال للتوقيع';
+  const rand = new Uint8Array(12); crypto.getRandomValues(rand);
+  const id = 'clinicsign-' + Array.from(rand, b => b.toString(16).padStart(2, '0')).join('');
+  const peer = new Peer(id);
+  let active = null;
+  setStatus('جارٍ التحضير…');
+  peer.on('open', () => { showQr(signBase + '#' + id); setStatus('في انتظار المريض…'); });
+  peer.on('connection', conn => {
+    if (active) { conn.on('open', () => conn.close()); return; }
+    active = conn;
+    conn.on('open', () => { conn.send({ type: 'config', aspect }); setStatus('الجوال متصل ✓ — المريض يوقّع الآن…', 'ok'); });
+    handle(conn, peer);
+  });
+  peer.on('error', err => setStatus('تعذّر الاتصال بالإنترنت (' + err.type + ')', 'err'));
+})();
+</script>
+</body>
+</html>
