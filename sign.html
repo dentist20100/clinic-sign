@@ -43,7 +43,7 @@
     <h1>وقّع بإصبعك داخل المربع</h1>
     <div id="status"></div>
     <div id="wrap"><canvas id="pad"></canvas></div>
-    <div class="hint">يمكنك قلب الجوال بالعرض للحصول على مساحة أكبر</div>
+    <div class="hint">وقّع بحجم كبير براحتك — سيُضبط الحجم تلقائياً في الإقرار</div>
     <div class="buttons">
       <button id="clear">مسح</button>
       <button id="send" disabled>إرسال التوقيع</button>
@@ -75,15 +75,30 @@
   // ---------- لوحة التوقيع ----------
   function layout() {
     const wrap = $('wrap');
-    const maxW = wrap.clientWidth, maxH = wrap.clientHeight;
-    if (!maxW || !maxH) return;
-    let w = maxW, h = w / aspect;
-    if (h > maxH) { h = maxH; w = h * aspect; }
+    const w = wrap.clientWidth, h = wrap.clientHeight;
+    if (!w || !h) return;
+    // المربع يملأ الشاشة؛ التوقيع يُصغَّر تلقائياً ليناسب خانة الإقرار عند الإرسال
+    const old = { w: canvas.clientWidth, h: canvas.clientHeight };
     const dpr = window.devicePixelRatio || 1;
     canvas.style.width = w + 'px'; canvas.style.height = h + 'px';
     canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     redraw();
+  }
+  // تحويل التوقيع ليملأ خانة الإقرار (مع هامش) بدون تمطيط
+  function fitted() {
+    const W = canvas.clientWidth, H = canvas.clientHeight, A = aspect;
+    let minx = 1e9, miny = 1e9, maxx = -1e9, maxy = -1e9;
+    for (const s of strokes) for (const p of s) {
+      const x = p.x * W, y = p.y * H;
+      if (x < minx) minx = x; if (y < miny) miny = y; if (x > maxx) maxx = x; if (y > maxy) maxy = y;
+    }
+    if (minx > maxx) return [];
+    const bw = Math.max(maxx - minx, 20), bh = Math.max(maxy - miny, 20);
+    const sc = Math.min(A * 0.9 / bw, 0.8 / bh);
+    const tx = (A - (maxx - minx) * sc) / 2 - minx * sc, ty = (1 - (maxy - miny) * sc) / 2 - miny * sc;
+    const c = v => Math.min(1, Math.max(0, v));
+    return strokes.map(s => s.map(p => ({ x: c((p.x * W * sc + tx) / A), y: c(p.y * H * sc + ty) })));
   }
   function redraw() {
     const w = canvas.clientWidth, h = canvas.clientHeight;
@@ -111,13 +126,13 @@
     for (const ev of (e.getCoalescedEvents ? e.getCoalescedEvents() : [e])) current.push(point(ev));
     redraw();
   });
-  const end = () => { if (!current) return; current = null; sendBtn.disabled = !(conn && conn.open); send({ type: 'preview', strokes }); };
+  const end = () => { if (!current) return; current = null; sendBtn.disabled = !(conn && conn.open); send({ type: 'preview', strokes: fitted() }); };
   canvas.addEventListener('pointerup', end);
   canvas.addEventListener('pointercancel', end);
-  clearBtn.onclick = () => { strokes = []; redraw(); sendBtn.disabled = true; send({ type: 'preview', strokes }); };
+  clearBtn.onclick = () => { strokes = []; redraw(); sendBtn.disabled = true; send({ type: 'preview', strokes: [] }); };
   sendBtn.onclick = () => {
     if (!strokes.length || !conn || !conn.open) return;
-    send({ type: 'submit', strokes });
+    send({ type: 'submit', strokes: fitted() });
     show('done');
     const c = conn;
     setTimeout(() => {

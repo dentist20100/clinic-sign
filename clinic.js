@@ -3,7 +3,8 @@
   if (window.__clinicSign) { window.__clinicSign.open(); return; }
 
   const SCRIPT = document.currentScript || [...document.scripts].reverse().find(x => /clinic\.js/.test(x.src));
-  const SITE = SCRIPT ? new URL('.', SCRIPT.src.split('?')[0]).href.replace(/\/$/, '') : '';
+  let SITE = '';
+  try { SITE = new URL('.', SCRIPT.src.split('?')[0]).href.replace(/\/$/, ''); } catch (_) {}
   const UI_ID = 'clinic-sign-ui';
   const TARGET_KEY = 'target:' + location.origin + location.pathname;
   const store = {
@@ -123,26 +124,32 @@
     canvas.scrollIntoView({ block: 'center', inline: 'center' });
     await sleep(150);
     const r = canvas.getBoundingClientRect();
-    const minDist = Math.max(3, Math.hypot(r.width, r.height) / 150); // \u062a\u0642\u0644\u064a\u0644 \u0627\u0644\u0646\u0642\u0627\u0637 \u0645\u0639 \u0627\u0644\u062d\u0641\u0627\u0638 \u0639\u0644\u0649 \u0627\u0644\u0634\u0643\u0644
-    const total = strokes.reduce((n, s) => n + s.length, 0);
+    const STEP = 1.5;        // px between points: dense so every library draws a continuous line
+    const PER_FRAME = 8;     // points per 16ms: throttled libraries still get smooth curves
+    const total = strokes.reduce((n, s) => n + s.length, 0) || 1;
     let done = 0;
 
     for (const s of strokes) {
       if (!s.length) continue;
       const pts = s.map(p => ({ x: r.left + p.x * r.width, y: r.top + p.y * r.height }));
-      const kept = [pts[0]];
+      const dense = [pts[0]];
       for (let i = 1; i < pts.length; i++) {
-        const last = kept[kept.length - 1];
-        if (Math.hypot(pts[i].x - last.x, pts[i].y - last.y) >= minDist || i === pts.length - 1) kept.push(pts[i]);
+        const a0 = dense[dense.length - 1], b0 = pts[i];
+        const d = Math.hypot(b0.x - a0.x, b0.y - a0.y);
+        if (d < 0.5) continue;
+        const n = Math.ceil(d / STEP);
+        for (let k = 1; k <= n; k++) dense.push({ x: a0.x + (b0.x - a0.x) * k / n, y: a0.y + (b0.y - a0.y) * k / n });
       }
-      fire(canvas, 'down', kept[0].x, kept[0].y, true);
-      await sleep(17);
-      for (let i = 1; i < kept.length; i++) {
-        fire(canvas, 'move', kept[i].x, kept[i].y, true);
-        await sleep(17); // \u0628\u0639\u0636 \u0645\u0643\u062a\u0628\u0627\u062a \u0627\u0644\u062a\u0648\u0642\u064a\u0639 \u062a\u062a\u062c\u0627\u0647\u0644 \u0627\u0644\u062d\u0631\u0643\u0627\u062a \u0627\u0644\u0623\u0633\u0631\u0639 \u0645\u0646 16ms
+      fire(canvas, 'down', dense[0].x, dense[0].y, true);
+      await sleep(16);
+      for (let i = 1; i < dense.length; i++) {
+        fire(canvas, 'move', dense[i].x, dense[i].y, true);
+        if (i % PER_FRAME === 0) await sleep(16);
       }
-      if (kept.length === 1) { fire(canvas, 'move', kept[0].x + 0.5, kept[0].y, true); await sleep(17); }
-      const last = kept[kept.length - 1];
+      if (dense.length === 1) fire(canvas, 'move', dense[0].x + 0.5, dense[0].y, true);
+      await sleep(16);
+      const last = dense[dense.length - 1];
+      fire(canvas, 'move', last.x, last.y, true);
       fire(canvas, 'up', last.x, last.y, false);
       await sleep(30);
       done += s.length;
